@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ewige Tabelle</title>
+<meta property="og:type" content="website"><meta property="og:title" content="Ewige Tabelle"><meta property="og:description" content="Ranglisten für Streamer: UNO, Marbles und Erster im Chat"><meta name="theme-color" content="#d90f0f">
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
@@ -87,8 +88,10 @@ footer a{color:#fff;margin:0 8px}
       <div><span class="dot" id="dot"></span><span id="status">Nicht verbunden</span></div>
       <div class="small" style="margin-top:10px">Dein Link zum Teilen (nur ansehen):</div>
       <div class="row"><input type="text" id="shareLink" readonly><button class="btn ghost" id="copyBtn">Kopieren</button></div>
+      <div class="small" style="margin-top:10px">Link für Discord („Erster im Chat“, mit Vorschau):</div>
+      <div class="row"><input type="text" id="dcLink" readonly><button class="btn ghost" id="dcCopy">Kopieren</button></div>
       <div class="small" style="margin-top:10px">Wichtig: Lass diese Seite beim Streamen geöffnet (z. B. als OBS-Dock), damit der Chat mitgelesen wird.</div>
-      <div class="info small">Befehle für Mods/Streamer: <b>!winner @Name uno|marbles</b> · <b>!undo uno|marbles</b> · <b>!runde</b> (startet „Erster im Chat“)</div>
+      <div class="info small">Befehle für Mods/Streamer: <b>!winner @Name uno|marbles</b> · <b>!undo uno|marbles</b> · <b>!undo chat</b> · <b>!runde</b> (optional, „Erster im Chat“ startet sonst automatisch) · Streamer schreibt <b>test</b> = zählt als Test-Eintrag</div>
       <div class="row"><button class="btn" id="guideBtn">Anleitung anzeigen</button><button class="btn ghost" id="delBtn">Meine Seite &amp; Daten löschen</button></div>
     </div>
   </div>
@@ -130,6 +133,8 @@ footer a{color:#fff;margin:0 8px}
 const SUPABASE_URL = "https://tfuliwcpekditwwdqdcr.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_eLQIOsRMpiivWHANxqpAoA_Nm9CLNab";
 const TWITCH_CLIENT_ID = "";    // optional: für automatische Stream-Start-Erkennung
+const SHARE_BASE = "";        // URL deines Preview-Workers (siehe worker.js). Leer = normaler Link ohne Discord-Vorschau
+const AUTO_GAP_H = 8;         // ab so vielen Stunden Pause startet automatisch eine neue Runde
 const IMPRESSUM_URL = "";       // Link zu deinem Impressum
 const PRIVACY_URL = "";         // Link zu deiner Datenschutzerklärung
 
@@ -138,7 +143,8 @@ const GAMES={
   marbles:{t:"Marbles",d:"Murmelrennen"},
   chat:{t:"Erster im Chat",d:"Top 3 nach Stream-Start",chat:true}
 };
-const ALIAS={uno:"uno",marbles:"marbles",murmeln:"marbles"};
+const ALIAS={uno:"uno",marbles:"marbles",murmeln:"marbles"}
+const UNDO_ALIAS={...ALIAS,chat:"chat"};;
 const IGNORE=["nightbot","streamelements","moobot","fossabot","streamlabs"];
 const $=id=>document.getElementById(id);
 const P=new URLSearchParams(location.search);
@@ -198,6 +204,7 @@ async function boot(){
   $("ownerBox").classList.toggle("hide",!owner||!!ONLY);
   if(owner){
     $("shareLink").value=location.origin+location.pathname+"?s="+row.login;
+    $("dcLink").value=shareFor("chat");
     connectChat();checkLive();setInterval(checkLive,30000);
     if(!ONLY){try{if(!localStorage.getItem("lb:guide:"+row.login))openGuide()}catch(e){}}
   }else{
@@ -232,10 +239,13 @@ $("delBtn").onclick=async()=>{
   await sb.from("streamers").delete().eq("id",row.id);
   await sb.auth.signOut();location.href=location.pathname;
 };
+const shareFor=g=>(SHARE_BASE||location.origin+location.pathname)+"?s="+row.login+"&game="+g;
+$("dcCopy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("dcLink").value);$("dcCopy").textContent="Kopiert ✓";setTimeout(()=>$("dcCopy").textContent="Kopieren",1500)};
 $("copyBtn").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("shareLink").value);$("copyBtn").textContent="Kopiert ✓";setTimeout(()=>$("copyBtn").textContent="Kopieren",1500)};
 
 /* ---------- Runden ---------- */
 const canon=(list,n)=>list.find(x=>x.toLowerCase()===n.toLowerCase())||n;
+function startRound(id){closeRound();data.current={streamId:id||"auto-"+Date.now(),date:new Date().toISOString(),top:[]};data.lastStart=Date.now()}
 function closeRound(){
   const c=data.current;
   if(c&&c.top.length)data.chat.push({streamId:c.streamId,date:c.date,top:c.top});
@@ -248,7 +258,7 @@ async function checkLive(){
     const r=await fetch("https://api.twitch.tv/helix/streams?user_login="+channel,{headers:{"Client-Id":TWITCH_CLIENT_ID,Authorization:"Bearer "+tok}});
     if(!r.ok)return;
     const s=(await r.json()).data[0];
-    if(s&&s.id!==data.lastStreamId){closeRound();data.lastStreamId=s.id;data.current={streamId:s.id,date:s.started_at,top:[]};save()}
+    if(s&&s.id!==data.lastStreamId){closeRound();data.lastStreamId=s.id;data.current={streamId:s.id,date:s.started_at,top:[]};data.lastStart=Date.now();save()}
     else if(!s&&data.current){closeRound();save()}
   }catch(e){}
 }
@@ -274,18 +284,27 @@ function onChat(tags,lg,text){
   const isBroad=lg===channel||(tags.badges||"").includes("broadcaster");
   const isMod=isBroad||tags.mod==="1";
   let m=text.match(/^!winner\s+@?(\S+)\s+(\S+)/i);
-  if(m&&isMod){const g=ALIAS[m[2].toLowerCase()];if(g){data[g].push(canon(data[g],m[1]));save()}return}
+  if(m&&isMod){const g=ALIAS[m[2].toLowerCase()];if(g&&g!=="chat"){data[g].push(canon(data[g],m[1]));save()}return}
   m=text.match(/^!undo\s+(\S+)/i);
-  if(m&&isMod){const g=ALIAS[m[1].toLowerCase()];if(g&&data[g].length){data[g].pop();save()}return}
-  if(/^!runde\b/i.test(text)&&isMod){closeRound();data.current={streamId:"manual-"+Date.now(),date:new Date().toISOString(),top:[]};save();return}
-  const c=data.current;
-  if(c&&c.top.length<3&&!isBroad&&!IGNORE.includes(lg)){
-    const d=tags["display-name"]||lg;
-    if(c.top.some(n=>n.toLowerCase()===d.toLowerCase()))return;
-    c.top.push(canon(data.chat.flatMap(r=>r.top),d));
-    if(c.top.length===3)closeRound();
-    save();
+  if(m&&isMod){const g=UNDO_ALIAS[m[1].toLowerCase()];
+    if(g==="chat"){if(data.current){data.current=null;data.lastStart=0}else data.chat.pop();save()}
+    else if(g&&data[g].length){data[g].pop();save()}return}
+  if(/^!runde\b/i.test(text)&&isMod){startRound("manual-"+Date.now());save();return}
+  const isTest=isBroad&&/^test$/i.test(text);
+  if(!isTest&&(isBroad||IGNORE.includes(lg)||text.startsWith("!")))return;
+  const gap=AUTO_GAP_H*36e5,now=Date.now();
+  if(data.current&&now-new Date(data.current.date)>gap)closeRound();
+  if(!data.current){
+    const last=data.lastStart||(data.chat.length?new Date(data.chat[data.chat.length-1].date).getTime():0);
+    if(isTest||now-last>gap)startRound();else return;
   }
+  const c=data.current;
+  if(c.top.length>=3)return;
+  const d=tags["display-name"]||lg;
+  if(c.top.some(n=>n.toLowerCase()===d.toLowerCase()))return;
+  c.top.push(canon(data.chat.flatMap(r=>r.top),d));
+  if(c.top.length===3)closeRound();
+  save();
 }
 
 /* ---------- Berechnung ---------- */
@@ -361,9 +380,9 @@ function openGuide(){
   li("Lass diese Seite beim Streamen geöffnet. Am einfachsten als OBS-Dock: OBS → Docks → Benutzerdefinierte Browser-Docks → Name „Rangliste“ → die URL unten einfügen. Melde dich im Dock einmal mit Twitch an. Alternativ reicht ein normaler Browser-Tab.",
      row_(copyBtn("Dock-URL kopieren",mine)));
   li("Du und deine Mods tragt Siege im Chat ein: ",code("!winner @Name uno")," oder ",code("!winner @Name marbles"),". Vertippt? ",code("!undo uno")," nimmt den letzten Eintrag raus.");
-  li("Sobald du live gehst, schreib ",code("!runde"),". Dann zählen die ersten 3 Chatter (ohne dich und Bots) bei „Erster im Chat“.");
+  li("„Erster im Chat“ startet automatisch: Sobald nach einer längeren Pause ("+AUTO_GAP_H+" Std.) jemand schreibt, zählen die ersten 3 Chatter (ohne dich und Bots). Zum Testen schreib als Streamer ",code("test")," (zählt mit, mit ",code("!undo chat")," wieder löschen). ",code("!runde")," geht weiterhin, wenn du manuell starten willst.");
   li("Teile diesen Link mit deiner Community. Wer ihn öffnet, kann nur zuschauen.",
-     row_(copyBtn("Zuschauer-Link kopieren",mine)));
+     row_(copyBtn("Zuschauer-Link kopieren",mine),copyBtn("Discord: Erster im Chat",shareFor("chat"))));
   li("Optional: Tabellen direkt im Stream zeigen. In OBS eine Quelle „Browser“ hinzufügen und einen dieser Links einfügen:",
      row_(copyBtn("UNO",mine+"&game=uno"),copyBtn("Marbles",mine+"&game=marbles"),copyBtn("Erster im Chat",mine+"&game=chat")));
   b.append(ol);
