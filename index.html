@@ -97,9 +97,10 @@ footer a{color:#fff;margin:0 8px}
   </div>
 
   <div id="game" class="hide">
-    <button class="back" id="back">← Zurück</button>
+    <button class="back" id="back">← Zurück</button> <button class="back hide" id="editBtn" style="margin-left:18px">✎ Bearbeiten</button>
     <div class="scroll"><table id="tbl"></table></div>
     <div id="info"></div>
+    <div id="editor"></div>
   </div>
 
   <footer id="foot"></footer>
@@ -206,7 +207,6 @@ async function boot(){
     $("shareLink").value=location.origin+location.pathname+"?s="+row.login;
     $("dcLink").value=shareFor("chat");
     connectChat();checkLive();setInterval(checkLive,30000);
-    if(!ONLY){try{if(!localStorage.getItem("lb:guide:"+row.login))openGuide()}catch(e){}}
   }else{
     pollTimer=setInterval(reload,15000);
   }
@@ -351,6 +351,7 @@ function render(){
     if(g.chat)r.append(el("td","×"+p.top3),el("td",p.streak>1?"🔥 "+p.streak:p.streak?"1":"–"));
     t.append(r);
   });
+  const eb=$("editBtn");eb.classList.toggle("hide",!owner||!!ONLY);eb.textContent=editing?"✓ Fertig":"✎ Bearbeiten";renderEditor();
   const info=$("info");info.innerHTML="";
   if(g.chat){
     const last=rounds[rounds.length-1],fmt=a=>a.map((n,i)=>(i+1)+". "+n).join("  ");
@@ -358,7 +359,46 @@ function render(){
     else if(last)info.append(el("div","Letzter Stream: "+fmt(last.top),"info"));
   }
 }
-$("back").onclick=()=>{cur=null;render()};
+$("back").onclick=()=>{cur=null;editing=false;render()};
+$("editBtn").onclick=()=>{editing=!editing;render()};
+
+/* ---------- Von Hand bearbeiten (nur Besitzer) ---------- */
+let editing=false;
+function renderEditor(){
+  const box=$("editor");box.innerHTML="";
+  if(!editing||!owner||ONLY||!cur)return;
+  const g=GAMES[cur],rounds=data[cur],wrap=el("div",null,"box");
+  const btn=(t,fn)=>{const b=el("button",t,"btn ghost");b.onclick=fn;return b};
+  const inp=(v,ph,fn)=>{const i=el("input");i.type="text";i.value=v;i.placeholder=ph||"";if(fn)i.onchange=()=>fn(i.value.trim());return i};
+  wrap.append(el("div",g.chat?"Streams bearbeiten – Namen ändern, leer lassen = Platz entfernen":"Spieler bearbeiten – Namen ändern, Siege mit − / + anpassen","small"));
+  if(!g.chat){
+    computeSimple(rounds).forEach(p=>{
+      const r=el("div",null,"row"),low=p.n.toLowerCase();
+      r.append(
+        inp(p.n,"",v=>{if(v&&v!==p.n){data[cur]=rounds.map(n=>n.toLowerCase()===low?v:n);save()}}),
+        btn("−",()=>{const i=rounds.map(n=>n.toLowerCase()).lastIndexOf(low);if(i>-1)rounds.splice(i,1);save()}),
+        el("span",p.w+" Siege"),
+        btn("+",()=>{rounds.push(p.n);save()}),
+        btn("✕",()=>{if(confirm(p.n+" komplett entfernen?")){data[cur]=rounds.filter(n=>n.toLowerCase()!==low);save()}}));
+      wrap.append(r);
+    });
+    const r=el("div",null,"row"),ni=inp("","Neuer Spieler");
+    r.append(ni,btn("+ Hinzufügen",()=>{const v=ni.value.trim();if(v){rounds.push(canon(rounds,v));save()}}));
+    wrap.append(r);
+  }else{
+    rounds.map((_,i)=>i).reverse().forEach(idx=>{
+      const s=rounds[idx],r=el("div",null,"row");
+      r.append(el("span",new Date(s.date).toLocaleDateString("de-DE")));
+      for(let i=0;i<3;i++)r.append(inp(s.top[i]||"",(i+1)+".",v=>{s.top=[0,1,2].map(k=>k===i?v:(s.top[k]||"")).filter(Boolean);save()}));
+      r.append(btn("✕",()=>{if(confirm("Diesen Stream löschen?")){rounds.splice(idx,1);save()}}));
+      wrap.append(r);
+    });
+    const r=el("div",null,"row"),ai=[0,1,2].map(i=>inp("",(i+1)+"."));
+    r.append(...ai,btn("+ Stream",()=>{const top=ai.map(x=>x.value.trim()).filter(Boolean);if(top.length){rounds.push({streamId:"hand-"+Date.now(),date:new Date().toISOString(),top});save()}}));
+    wrap.append(r);
+  }
+  box.append(wrap);
+}
 
 /* ---------- Anleitung für Streamer ---------- */
 function copyBtn(label,text){
