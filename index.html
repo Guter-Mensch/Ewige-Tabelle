@@ -300,6 +300,13 @@
         width: 18px;
         height: 18px;
       }
+      .chk.tight {
+        margin-bottom: 4px;
+        align-items: center;
+      }
+      .chk.tight input {
+        margin-top: 0;
+      }
       footer {
         margin-top: 40px;
         text-align: center;
@@ -415,9 +422,14 @@
           <div class="info small">
             Befehle für Mods/Streamer: <b>!winner @Name uno|marbles</b> · <b>!undo uno|marbles</b> ·
             <b>!undo chat</b> · <b>!runde</b> (optional, „Erster im Chat“ startet sonst automatisch) ·
-            Streamer schreibt <b>test</b> = zählt als Test-Eintrag
+            Streamer schreibt <b>test</b> = zählt als Test-Eintrag<br />
+            Eigene Kategorien: <b>!winner @Name kategoriename</b> (Name in Kleinbuchstaben, ohne Leer- und
+            Sonderzeichen)<br />
+            Seasons: Die aktive Season einer Kategorie bekommt jeden Sieg automatisch mit. Anlegen und
+            beenden im Bearbeiten-Modus (✎).
           </div>
           <div class="row">
+            <button class="btn" id="catsBtn">＋ Kategorien verwalten</button>
             <button class="btn" id="guideBtn">Anleitung anzeigen</button
             ><button class="btn ghost" id="delBtn">Meine Seite &amp; Daten löschen</button>
           </div>
@@ -429,6 +441,7 @@
         <button class="back hide" id="editBtn" style="margin-left: 18px">✎ Bearbeiten</button>
         <div class="scroll"><table id="tbl"></table></div>
         <div id="info"></div>
+        <div id="seasons"></div>
         <div id="editor"></div>
       </div>
 
@@ -468,6 +481,14 @@
       </div>
     </div>
 
+    <div class="modal hide" id="catModal">
+      <div>
+        <h2>Kategorien</h2>
+        <div class="gbody" id="catBody"></div>
+        <div class="row"><button class="btn" id="catClose">Fertig</button></div>
+      </div>
+    </div>
+
     <script>
       // Einstellungen
       const SUPABASE_URL = "https://tfuliwcpekditwwdqdcr.supabase.co";
@@ -478,18 +499,30 @@
       // Pflichtangaben für Impressum und Datenschutzerklärung (werden auf der Seite angezeigt)
       const OPERATOR = { name: "Guter Mensch", address: "", email: "bonzig45@gmail.com" };
 
-      const GAMES = {
+      // Standard-Kategorien (Twitch-Bestenliste "chat" kann nicht entfernt werden)
+      const BUILTIN = {
         uno: { t: "UNO mit Zuschauern", d: "Wer gewinnt die Runde?" },
         marbles: { t: "Marbles", d: "Murmelrennen" },
         chat: { t: "Erster im Chat", d: "Top 3 nach Stream-Start", chat: true },
       };
-      const ALIAS = { uno: "uno", marbles: "marbles", murmeln: "marbles" };
-      const UNDO_ALIAS = { ...ALIAS, chat: "chat" };
+      const ALIAS = { murmeln: "marbles" };
+      const DEF_STATS = { rank: true, wins: true, pct: true };
       const IGNORE = ["nightbot", "streamelements", "moobot", "fossabot", "streamlabs"];
       const $ = (id) => document.getElementById(id);
       const P = new URLSearchParams(location.search);
-      const ONLY = GAMES[P.get("game")] ? P.get("game") : null;
-      const emptyData = () => ({ uno: [], marbles: [], chat: [], current: null, lastStreamId: null });
+      // cats = IDs eigener Kategorien, hidden = ausgeblendete Standard-Kategorien, cfg = Name/Beschreibung/Stats je Kategorie
+      // seasons = { kategorieId: [ { id, t, rounds: [Namen], active } ] }
+      const emptyData = () => ({
+        uno: [],
+        marbles: [],
+        chat: [],
+        current: null,
+        lastStreamId: null,
+        cats: [],
+        hidden: [],
+        cfg: {},
+        seasons: {},
+      });
       const el = (tag, txt, cls) => {
         const e = document.createElement(tag);
         if (txt != null) e.textContent = txt;
@@ -500,16 +533,71 @@
         const m = u.user_metadata || {};
         return String(m.preferred_username || m.user_name || m.name || m.nickname || "").toLowerCase();
       };
+      const slug = (s) =>
+        String(s)
+          .toLowerCase()
+          .replace(/[^a-z0-9äöüß]/g, "");
 
       let sb = null,
         session = null,
         row = null,
         owner = false,
         data = emptyData(),
+        ONLY = P.get("game") || null,
         cur = ONLY,
+        curSeason = null,
         ws = null,
         channel = "",
         pollTimer = null;
+
+      // Aktive Kategorien dieses Streamers (Standard + eigene, ohne ausgeblendete)
+      function G() {
+        const out = {},
+          cfg = data.cfg || {},
+          hidden = data.hidden || [];
+        const add = (k, base) => {
+          const c = cfg[k] || {};
+          out[k] = {
+            t: c.t || base.t,
+            d: c.d != null ? c.d : base.d,
+            chat: !!base.chat,
+            custom: !!base.custom,
+            stats: { ...DEF_STATS, ...(c.stats || {}) },
+          };
+        };
+        Object.entries(BUILTIN).forEach(([k, b]) => {
+          if (b.chat || !hidden.includes(k)) add(k, b);
+        });
+        (data.cats || []).forEach((id) => add(id, { t: "Neue Kategorie", d: "", custom: true }));
+        return out;
+      }
+      // Chat-Befehl-Wort -> Kategorie-ID (nur Kategorien mit Siegerliste)
+      function findKey(word) {
+        const w = slug(word),
+          g = G();
+        if (ALIAS[w] && g[ALIAS[w]]) return ALIAS[w];
+        return Object.keys(g).find((k) => !g[k].chat && (k === w || slug(g[k].t) === w)) || null;
+      }
+      const cfgOf = (k) => {
+        data.cfg = data.cfg || {};
+        data.cfg[k] = data.cfg[k] || {};
+        return data.cfg[k];
+      };
+      // Falls die Kategorie (z. B. per Link) nicht mehr existiert, zurück zur Übersicht
+      function fixCur() {
+        if (cur && !G()[cur]) {
+          ONLY = null;
+          cur = null;
+        }
+        if (!cur || !getSeason()) curSeason = null;
+      }
+      // Seasons einer Kategorie
+      const seasonsOf = (k) => {
+        data.seasons = data.seasons || {};
+        return (data.seasons[k] = data.seasons[k] || []);
+      };
+      const getSeason = () => (cur && curSeason ? seasonsOf(cur).find((s) => s.id === curSeason) || null : null);
+      const activeSeason = (k) => seasonsOf(k).find((s) => s.active) || null;
 
       // Anzeige-Hilfen
       function view(name) {
@@ -664,6 +752,7 @@
         row = r;
         owner = !!session && r.id === session.user.id;
         data = { ...emptyData(), ...(r.data || {}) };
+        fixCur();
         renderBar();
         channel = row.login;
         $("ownerBox").classList.toggle("hide", !owner || !!ONLY);
@@ -813,24 +902,33 @@
         const isMod = isBroad || tags.mod === "1";
         let m = text.match(/^!winner\s+@?(\S+)\s+(\S+)/i);
         if (m && isMod) {
-          const g = ALIAS[m[2].toLowerCase()];
-          if (g && g !== "chat") {
-            data[g].push(canon(data[g], m[1]));
+          const g = findKey(m[2]);
+          if (g) {
+            data[g] = data[g] || [];
+            const nm = canon(data[g], m[1]);
+            data[g].push(nm);
+            const as = activeSeason(g);
+            if (as) as.rounds.push(canon(as.rounds, nm));
             save();
           }
           return;
         }
         m = text.match(/^!undo\s+(\S+)/i);
         if (m && isMod) {
-          const g = UNDO_ALIAS[m[1].toLowerCase()];
+          const g = slug(m[1]) === "chat" ? "chat" : findKey(m[1]);
           if (g === "chat") {
             if (data.current) {
               data.current = null;
               data.lastStart = 0;
             } else data.chat.pop();
             save();
-          } else if (g && data[g].length) {
-            data[g].pop();
+          } else if (g && data[g] && data[g].length) {
+            const last = data[g].pop(),
+              as = activeSeason(g);
+            if (as) {
+              const i = as.rounds.map((x) => x.toLowerCase()).lastIndexOf(String(last).toLowerCase());
+              if (i > -1) as.rounds.splice(i, 1);
+            }
             save();
           }
           return;
@@ -915,18 +1013,23 @@
       // Tabellen
       function render() {
         if (!row) return;
+        fixCur();
+        const games = G();
         if (!cur) {
           view("home");
           $("title").textContent = row.display_name || row.login;
           $("subt").textContent = "Ewige Tabelle";
           $("stand").textContent = "Wähle ein Spiel";
           $("cards").innerHTML = "";
-          for (const [k, g] of Object.entries(GAMES)) {
+          for (const [k, g] of Object.entries(games)) {
             const b = el("button", null, "card"),
               d = el("div");
             d.append(
               el("b", g.t),
-              el("small", g.d + " · " + data[k].length + (g.chat ? " Streams" : " Runden")),
+              el(
+                "small",
+                (g.d ? g.d + " · " : "") + (data[k] || []).length + (g.chat ? " Streams" : " Runden"),
+              ),
             );
             b.append(d, el("i", "›"));
             b.onclick = () => {
@@ -937,18 +1040,24 @@
           }
           return;
         }
-        const g = GAMES[cur],
-          rounds = data[cur];
+        const g = games[cur],
+          S = getSeason(),
+          rounds = S ? S.rounds : data[cur] || [];
         view("game");
-        $("back").classList.toggle("hide", !!ONLY);
-        $("title").textContent = g.t;
-        $("subt").textContent = "Ewige Tabelle";
-        $("stand").textContent = "Stand nach " + rounds.length + (g.chat ? " Streams" : " Runden");
+        $("back").classList.toggle("hide", !!ONLY && !S);
+        $("title").textContent = S ? S.t : g.t;
+        $("subt").textContent = S ? g.t : "Ewige Tabelle";
+        $("stand").textContent =
+          (S ? "Season · " : "") + "Stand nach " + rounds.length + (g.chat ? " Streams" : " Runden");
         const list = g.chat ? computeChat(rounds) : computeSimple(rounds);
+        const st = g.chat ? DEF_STATS : g.stats;
         const t = $("tbl");
         t.innerHTML = "";
         const hr = el("tr");
-        [["Platz"], ["Spieler", "l"], ["Siege"], ["Anteil"]].forEach(([x, c]) => hr.append(el("th", x, c)));
+        if (st.rank) hr.append(el("th", "Platz"));
+        hr.append(el("th", "Spieler", "l"));
+        if (st.wins) hr.append(el("th", "Siege"));
+        if (st.pct) hr.append(el("th", "Anteil"));
         if (g.chat) {
           hr.append(el("th", "Top 3"));
           hr.append(el("th", "Streak"));
@@ -957,14 +1066,17 @@
         if (!list.length) {
           const r = el("tr"),
             c = el("td", "Noch keine Einträge.", "empty");
-          c.colSpan = g.chat ? 6 : 4;
+          c.colSpan = hr.children.length;
           r.append(c);
           t.append(r);
         }
         list.forEach((p) => {
           const r = el("tr");
           if (p.rank === 1) r.className = "first";
-          r.append(el("td", p.rank, "rk"), el("td", p.n, "l"), el("td", p.w), el("td", p.pct + "%"));
+          if (st.rank) r.append(el("td", p.rank, "rk"));
+          r.append(el("td", p.n, "l"));
+          if (st.wins) r.append(el("td", p.w));
+          if (st.pct) r.append(el("td", p.pct + "%"));
           if (g.chat)
             r.append(
               el("td", "×" + p.top3),
@@ -985,10 +1097,52 @@
             info.append(el("div", "⏳ Runde läuft: " + (fmt(data.current.top) || "noch niemand"), "info"));
           else if (last) info.append(el("div", "Letzter Stream: " + fmt(last.top), "info"));
         }
+        renderSeasons(g, S, st);
+      }
+      // Season-Kästchen (Top 5) unter der Kategorie-Tabelle
+      function renderSeasons(g, S, st) {
+        const box = $("seasons");
+        box.innerHTML = "";
+        if (g.chat || S) return;
+        const list = seasonsOf(cur);
+        if (!list.length) return;
+        const h = el("div", "Seasons", "small");
+        h.style.cssText = "margin-top:30px;letter-spacing:0.3em;text-transform:uppercase";
+        const grid = el("div", null, "cards");
+        grid.style.marginTop = "10px";
+        list
+          .slice()
+          .reverse()
+          .forEach((s) => {
+            const b = el("button", null, "card"),
+              d = el("div");
+            d.append(el("b", s.t + (s.active ? " · aktiv" : "")));
+            const top = computeSimple(s.rounds).slice(0, 5);
+            if (!top.length) {
+              const e = el("small", "Noch keine Einträge");
+              e.style.display = "block";
+              d.append(e);
+            }
+            top.forEach((p) => {
+              const l = el("small", p.rank + ". " + p.n + (st.wins ? " · " + p.w : ""));
+              l.style.display = "block";
+              d.append(l);
+            });
+            b.append(d, el("i", "›"));
+            b.onclick = () => {
+              curSeason = s.id;
+              render();
+            };
+            grid.append(b);
+          });
+        box.append(h, grid);
       }
       $("back").onclick = () => {
-        cur = null;
-        editing = false;
+        if (curSeason) curSeason = null;
+        else {
+          cur = null;
+          editing = false;
+        }
         render();
       };
       $("editBtn").onclick = () => {
@@ -996,14 +1150,105 @@
         render();
       };
 
+      // Kategorien verwalten (nur Besitzer)
+      function statBoxes(stats, onChange) {
+        const box = el("div"),
+          inputs = {};
+        [
+          ["rank", "Platz anzeigen"],
+          ["wins", "Siege anzeigen"],
+          ["pct", "Anteil anzeigen"],
+        ].forEach(([k, label]) => {
+          const l = el("label", null, "chk tight"),
+            i = el("input");
+          i.type = "checkbox";
+          i.checked = !!stats[k];
+          i.onchange = () => onChange && onChange(read());
+          inputs[k] = i;
+          l.append(i, el("span", label));
+          box.append(l);
+        });
+        const read = () => ({ rank: inputs.rank.checked, wins: inputs.wins.checked, pct: inputs.pct.checked });
+        return { box, read };
+      }
+      function slugTaken(name, exceptKey) {
+        const s = slug(name),
+          g = G();
+        return !s || s === "chat" || Object.keys(g).some((k) => k !== exceptKey && slug(g[k].t) === s);
+      }
+      function openCats() {
+        const b = $("catBody");
+        b.innerHTML = "";
+        const wrap = el("div", null, "info");
+        wrap.style.marginTop = "0";
+        wrap.append(el("div", "Neue Kategorie erstellen", "small"));
+        const nameIn = el("input"),
+          descIn = el("input");
+        nameIn.type = descIn.type = "text";
+        nameIn.placeholder = "Name (z. B. Mario Kart)";
+        descIn.placeholder = "Beschreibung (optional)";
+        const r1 = el("div", null, "row"),
+          r2 = el("div", null, "row");
+        r1.append(nameIn);
+        r2.append(descIn);
+        const sb2 = statBoxes(DEF_STATS);
+        sb2.box.style.marginTop = "10px";
+        const create = el("button", "Kategorie erstellen", "btn");
+        create.onclick = () => {
+          const name = nameIn.value.trim();
+          if (!name) return alert("Bitte einen Namen eingeben.");
+          if (slugTaken(name)) return alert("Diesen Namen gibt es schon (oder er ist nicht erlaubt).");
+          const id = "c" + Date.now().toString(36);
+          data.cats = [...(data.cats || []), id];
+          data[id] = [];
+          data.cfg = data.cfg || {};
+          data.cfg[id] = { t: name, d: descIn.value.trim(), stats: sb2.read() };
+          $("catModal").classList.add("hide");
+          cur = id;
+          editing = true;
+          save();
+        };
+        const r3 = el("div", null, "row");
+        r3.append(create);
+        wrap.append(r1, r2, sb2.box, r3);
+        b.append(wrap);
+
+        const hidden = (data.hidden || []).filter((k) => BUILTIN[k]);
+        if (hidden.length) {
+          const h = el("div", null, "info");
+          h.append(el("div", "Ausgeblendete Standard-Kategorien", "small"));
+          hidden.forEach((k) => {
+            const r = el("div", null, "row"),
+              back = el("button", "Wiederherstellen", "btn ghost");
+            back.onclick = () => {
+              data.hidden = (data.hidden || []).filter((x) => x !== k);
+              save();
+              openCats();
+            };
+            r.append(el("span", BUILTIN[k].t), back);
+            h.append(r);
+          });
+          b.append(h);
+        }
+        $("catModal").classList.remove("hide");
+      }
+      $("catsBtn").onclick = openCats;
+      $("catClose").onclick = () => $("catModal").classList.add("hide");
+
       // Von Hand bearbeiten (nur Besitzer)
       let editing = false;
       function renderEditor() {
         const box = $("editor");
         box.innerHTML = "";
         if (!editing || !owner || ONLY || !cur) return;
-        const g = GAMES[cur],
-          rounds = data[cur],
+        const g = G()[cur];
+        if (!g) return;
+        const S = getSeason(),
+          rounds = S ? S.rounds : (data[cur] = data[cur] || []),
+          setRounds = (arr) => {
+            if (S) S.rounds = arr;
+            else data[cur] = arr;
+          },
           wrap = el("div", null, "box");
         const btn = (t, fn) => {
           const b = el("button", t, "btn ghost");
@@ -1018,6 +1263,125 @@
           if (fn) i.onchange = () => fn(i.value.trim());
           return i;
         };
+        if (S) {
+          // Einstellungen der Season
+          const set = el("div", null, "info");
+          set.style.marginTop = "0";
+          set.append(el("div", "Season-Einstellungen", "small"));
+          const r1 = el("div", null, "row");
+          r1.append(
+            inp(S.t, "Name der Season", (v) => {
+              if (!v || v === S.t) return;
+              S.t = v;
+              save();
+            }),
+          );
+          const r2 = el("div", null, "row");
+          r2.append(
+            btn(S.active ? "Season beenden" : "Als aktive Season setzen", () => {
+              const was = S.active;
+              seasonsOf(cur).forEach((x) => (x.active = false));
+              S.active = !was;
+              save();
+            }),
+            btn("Season löschen", () => {
+              if (!confirm("„" + S.t + "“ mit allen Einträgen unwiderruflich löschen?")) return;
+              data.seasons[cur] = seasonsOf(cur).filter((x) => x.id !== S.id);
+              curSeason = null;
+              save();
+            }),
+          );
+          set.append(r1);
+          set.append(
+            el(
+              "div",
+              S.active
+                ? "Diese Season ist aktiv: Siege aus dem Chat zählen hier automatisch mit."
+                : "Diese Season ist beendet: Siege aus dem Chat zählen hier nicht mit.",
+              "small",
+            ),
+          );
+          set.append(r2);
+          wrap.append(set);
+        }
+        if (!g.chat && !S) {
+          // Einstellungen der Kategorie
+          const set = el("div", null, "info");
+          set.style.marginTop = "0";
+          set.append(el("div", "Kategorie-Einstellungen", "small"));
+          const r1 = el("div", null, "row"),
+            r2 = el("div", null, "row");
+          r1.append(
+            inp(g.t, "Name", (v) => {
+              if (!v || v === g.t) return;
+              if (slugTaken(v, cur)) return alert("Diesen Namen gibt es schon (oder er ist nicht erlaubt).");
+              cfgOf(cur).t = v;
+              save();
+            }),
+          );
+          r2.append(
+            inp(g.d, "Beschreibung", (v) => {
+              cfgOf(cur).d = v;
+              save();
+            }),
+          );
+          const sbx = statBoxes(g.stats, (s) => {
+            cfgOf(cur).stats = s;
+            save();
+          });
+          sbx.box.style.marginTop = "10px";
+          set.append(r1, r2, sbx.box);
+          set.append(el("div", "Chat-Befehl: !winner @Name " + slug(g.t), "small"));
+          const r3 = el("div", null, "row");
+          r3.append(
+            btn(g.custom ? "Kategorie löschen" : "Kategorie ausblenden", () => {
+              const ok = g.custom
+                ? confirm("„" + g.t + "“ mit allen Einträgen unwiderruflich löschen?")
+                : confirm("„" + g.t + "“ ausblenden? Die Einträge bleiben erhalten, du kannst sie unter „Kategorien verwalten“ wiederherstellen.");
+              if (!ok) return;
+              if (g.custom) {
+                data.cats = (data.cats || []).filter((x) => x !== cur);
+                delete data[cur];
+                if (data.cfg) delete data.cfg[cur];
+                if (data.seasons) delete data.seasons[cur];
+              } else {
+                data.hidden = [...(data.hidden || []), cur];
+              }
+              cur = null;
+              editing = false;
+              save();
+            }),
+          );
+          set.append(r3);
+          wrap.append(set);
+
+          // Seasons anlegen
+          const sBox = el("div", null, "info");
+          sBox.append(el("div", "Seasons", "small"));
+          const sr = el("div", null, "row"),
+            sIn = inp("", "Name der neuen Season (leer = Season " + (seasonsOf(cur).length + 1) + ")");
+          sr.append(
+            sIn,
+            btn("+ Season", () => {
+              const list = seasonsOf(cur),
+                name = sIn.value.trim() || "Season " + (list.length + 1);
+              list.forEach((x) => (x.active = false));
+              const s = { id: "s" + Date.now().toString(36), t: name, rounds: [], active: true };
+              list.push(s);
+              curSeason = s.id;
+              save();
+            }),
+          );
+          sBox.append(sr);
+          sBox.append(
+            el(
+              "div",
+              "Die neue Season ist aktiv und startet bei null. Siege aus dem Chat zählen in der Gesamtliste und in der aktiven Season. Vorherige Seasons bleiben unverändert.",
+              "small",
+            ),
+          );
+          wrap.append(sBox);
+        }
         wrap.append(
           el(
             "div",
@@ -1034,7 +1398,7 @@
             r.append(
               inp(p.n, "", (v) => {
                 if (v && v !== p.n) {
-                  data[cur] = rounds.map((n) => (n.toLowerCase() === low ? v : n));
+                  setRounds(rounds.map((n) => (n.toLowerCase() === low ? v : n)));
                   save();
                 }
               }),
@@ -1050,7 +1414,7 @@
               }),
               btn("✕", () => {
                 if (confirm(p.n + " komplett entfernen?")) {
-                  data[cur] = rounds.filter((n) => n.toLowerCase() !== low);
+                  setRounds(rounds.filter((n) => n.toLowerCase() !== low));
                   save();
                 }
               }),
@@ -1175,9 +1539,7 @@
         li(
           "Optional: Tabellen direkt im Stream zeigen. In OBS eine Quelle „Browser“ hinzufügen und einen dieser Links einfügen:",
           buttonRow(
-            copyBtn("UNO", mine + "&game=uno"),
-            copyBtn("Marbles", mine + "&game=marbles"),
-            copyBtn("Erster im Chat", mine + "&game=chat"),
+            ...Object.entries(G()).map(([k, gg]) => copyBtn(gg.t, mine + "&game=" + k)),
           ),
         );
         b.append(ol);
