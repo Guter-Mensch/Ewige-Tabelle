@@ -1303,6 +1303,46 @@
           );
           set.append(r2);
           wrap.append(set);
+
+          // Einzelne Spieler (mit Siegen) aus der Gesamtliste in diese Season kopieren
+          const cp = el("div", null, "info");
+          cp.append(
+            el(
+              "div",
+              "Aus der Gesamtliste kopieren: Die Siege des Spielers werden in diese Season übernommen (bereits vorhandene Siege dieses Spielers in der Season werden dabei ersetzt).",
+              "small",
+            ),
+          );
+          const mainList = computeSimple(data[cur] || []);
+          const copyOne = (p) => {
+            const low = p.n.toLowerCase();
+            S.rounds = S.rounds.filter((n) => n.toLowerCase() !== low);
+            for (let i = 0; i < p.w; i++) S.rounds.push(p.n);
+          };
+          if (!mainList.length) cp.append(el("div", "Die Gesamtliste ist noch leer.", "small"));
+          mainList.forEach((p) => {
+            const r = el("div", null, "row");
+            r.append(
+              el("span", p.n + " · " + p.w + " Siege"),
+              btn("→ kopieren", () => {
+                copyOne(p);
+                save();
+              }),
+            );
+            cp.append(r);
+          });
+          if (mainList.length) {
+            const ra = el("div", null, "row");
+            ra.append(
+              btn("Alle kopieren", () => {
+                if (!confirm("Alle Spieler aus der Gesamtliste in diese Season kopieren?")) return;
+                mainList.forEach(copyOne);
+                save();
+              }),
+            );
+            cp.append(ra);
+          }
+          wrap.append(cp);
         }
         if (!g.chat && !S) {
           // Einstellungen der Kategorie
