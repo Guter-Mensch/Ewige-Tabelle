@@ -1004,24 +1004,51 @@
           rounds.length,
         );
       }
-      function computeChat(streams) {
-        const m = {};
-        streams.forEach((s) =>
-          s.top.forEach((n, i) => {
-            const k = n.toLowerCase();
-            m[k] = m[k] || { n, w: 0, top3: 0, streak: 0 };
-            m[k].top3++;
-            if (i === 0) m[k].w++;
-          }),
-        );
-        Object.entries(m).forEach(([k, p]) => {
-          for (let i = streams.length - 1; i >= 0; i--) {
-            if (streams[i].top.some((n) => n.toLowerCase() === k)) p.streak++;
-            else break;
+      // Erster im Chat: Streak = in wie vielen Streams hintereinander (bis einschließlich dem gezeigten) in der Top 3
+      function streakBefore(hist, name) {
+        const k = name.toLowerCase();
+        let s = 0;
+        for (let i = hist.length - 1; i >= 0; i--) {
+          if (hist[i].top.some((n) => n.toLowerCase() === k)) s++;
+          else break;
+        }
+        return s;
+      }
+      function chatBoard() {
+        const streams = data.chat || [],
+          running = !!data.current;
+        const hasStream = running || streams.length > 0;
+        // Gezeigt wird der laufende Stream, sonst der letzte abgeschlossene
+        const shown = running ? data.current.top : hasStream ? streams[streams.length - 1].top : [];
+        const hist = running ? streams : streams.slice(0, -1);
+        const rows = shown.slice(0, 3).map((n, i) => ({ rank: i + 1, n, streak: 1 + streakBefore(hist, n) }));
+        return { rows, running, hasStream };
+      }
+      function drawChatTable(t, b) {
+        const hr = el("tr");
+        hr.append(el("th", "Platz"), el("th", "Spieler", "l"), el("th", "Streak"));
+        t.append(hr);
+        if (!b.hasStream) {
+          const r = el("tr"),
+            c = el("td", "Noch keine Einträge.", "empty");
+          c.colSpan = 3;
+          r.append(c);
+          t.append(r);
+          return;
+        }
+        for (let i = 0; i < 3; i++) {
+          const p = b.rows[i];
+          if (!p && !b.running) continue;
+          const r = el("tr");
+          if (i === 0 && p) r.className = "first";
+          r.append(el("td", i + 1, "rk"));
+          if (p) {
+            r.append(el("td", p.n, "l"), el("td", p.streak > 1 ? "🔥 " + p.streak : String(p.streak)));
+          } else {
+            r.append(el("td", "–", "l"), el("td", "–"));
           }
-        });
-        const l = Object.values(m).sort((a, b) => b.w - a.w || b.top3 - a.top3 || a.n.localeCompare(b.n));
-        return rankify(l, streams.length).slice(0, 3);
+          t.append(r);
+        }
       }
 
       // Tabellen
@@ -1061,43 +1088,44 @@
         $("back").classList.toggle("hide", !!ONLY && !S);
         $("title").textContent = S ? S.t : g.t;
         $("subt").textContent = S ? g.t : "Ewige Tabelle";
-        $("stand").textContent =
-          (S ? "Season · " : "") + "Stand nach " + rounds.length + (g.chat ? " Streams" : " Runden");
-        const list = g.chat ? computeChat(rounds) : computeSimple(rounds);
         const st = g.chat ? DEF_STATS : g.stats;
         const t = $("tbl");
         t.innerHTML = "";
-        const hr = el("tr");
-        if (st.rank) hr.append(el("th", "Platz"));
-        hr.append(el("th", "Spieler", "l"));
-        if (st.wins) hr.append(el("th", "Siege"));
-        if (st.pct) hr.append(el("th", "Anteil"));
         if (g.chat) {
-          hr.append(el("th", "Top 3"));
-          hr.append(el("th", "Streak"));
+          // Erster im Chat: nur die Top 3 des Streams + Streak (kein Anteil, keine Siege)
+          const b = chatBoard();
+          $("stand").textContent = b.running
+            ? "Aktueller Stream"
+            : b.hasStream
+              ? "Letzter Stream"
+              : "Noch kein Stream";
+          drawChatTable(t, b);
+        } else {
+          $("stand").textContent = (S ? "Season · " : "") + "Stand nach " + rounds.length + " Runden";
+          const list = computeSimple(rounds);
+          const hr = el("tr");
+          if (st.rank) hr.append(el("th", "Platz"));
+          hr.append(el("th", "Spieler", "l"));
+          if (st.wins) hr.append(el("th", "Siege"));
+          if (st.pct) hr.append(el("th", "Anteil"));
+          t.append(hr);
+          if (!list.length) {
+            const r = el("tr"),
+              c = el("td", "Noch keine Einträge.", "empty");
+            c.colSpan = hr.children.length;
+            r.append(c);
+            t.append(r);
+          }
+          list.forEach((p) => {
+            const r = el("tr");
+            if (p.rank === 1) r.className = "first";
+            if (st.rank) r.append(el("td", p.rank, "rk"));
+            r.append(el("td", p.n, "l"));
+            if (st.wins) r.append(el("td", p.w));
+            if (st.pct) r.append(el("td", p.pct + "%"));
+            t.append(r);
+          });
         }
-        t.append(hr);
-        if (!list.length) {
-          const r = el("tr"),
-            c = el("td", "Noch keine Einträge.", "empty");
-          c.colSpan = hr.children.length;
-          r.append(c);
-          t.append(r);
-        }
-        list.forEach((p) => {
-          const r = el("tr");
-          if (p.rank === 1) r.className = "first";
-          if (st.rank) r.append(el("td", p.rank, "rk"));
-          r.append(el("td", p.n, "l"));
-          if (st.wins) r.append(el("td", p.w));
-          if (st.pct) r.append(el("td", p.pct + "%"));
-          if (g.chat)
-            r.append(
-              el("td", "×" + p.top3),
-              el("td", p.streak > 1 ? "🔥 " + p.streak : p.streak ? "1" : "–"),
-            );
-          t.append(r);
-        });
         const eb = $("editBtn");
         eb.classList.toggle("hide", !owner || !!ONLY);
         eb.textContent = editing ? "✓ Fertig" : "✎ Bearbeiten";
@@ -1105,11 +1133,13 @@
         const info = $("info");
         info.innerHTML = "";
         if (g.chat) {
-          const last = rounds[rounds.length - 1],
-            fmt = (a) => a.map((n, i) => i + 1 + ". " + n).join("  ");
-          if (data.current)
-            info.append(el("div", "⏳ Runde läuft: " + (fmt(data.current.top) || "noch niemand"), "info"));
-          else if (last) info.append(el("div", "Letzter Stream: " + fmt(last.top), "info"));
+          info.append(
+            el(
+              "div",
+              "Die Top 3 wird mit jedem Stream neu vergeben. Der Streak zählt, wie oft du hintereinander in der Top 3 warst.",
+              "info small",
+            ),
+          );
         }
         renderSeasons(g, S, st);
       }
