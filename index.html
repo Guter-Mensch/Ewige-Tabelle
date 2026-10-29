@@ -414,6 +414,10 @@
 
       <div id="home" class="hide">
         <div id="cards" class="cards"></div>
+        <div class="box hide" id="editorBox">
+          <div class="small">Du bearbeitest diese Seite als Editor.</div>
+          <div class="row"><button class="btn" id="catsBtn2">＋ Kategorien verwalten</button></div>
+        </div>
         <div class="box" id="ownerBox">
           <div><span class="dot" id="dot"></span><span id="status">Nicht verbunden</span></div>
           <div class="small" style="margin-top: 10px">Dein Link zum Teilen (nur ansehen):</div>
@@ -501,6 +505,22 @@
       </div>
     </div>
 
+    <div class="modal hide" id="edModal">
+      <div>
+        <h2>Editoren</h2>
+        <div class="gbody" id="edBody"></div>
+        <div class="row"><button class="btn" id="edClose">Fertig</button></div>
+      </div>
+    </div>
+
+    <div class="modal hide" id="myEditsModal">
+      <div>
+        <h2>Ich bin Editor bei</h2>
+        <div class="gbody" id="myEditsBody"></div>
+        <div class="row"><button class="btn" id="myEditsClose">Schließen</button></div>
+      </div>
+    </div>
+
     <script>
       // Einstellungen
       const SUPABASE_URL = "https://tfuliwcpekditwwdqdcr.supabase.co";
@@ -508,7 +528,8 @@
       const TWITCH_CLIENT_ID = ""; // optional: für automatische Stream-Start-Erkennung
       const SHARE_BASE = "https://ewige-tabelle-preview.bonzig45.workers.dev"; // URL deines Preview-Workers (siehe worker.js). Leer = normaler Link ohne Discord-Vorschau
       const AUTO_GAP_H = 8; // ab so vielen Stunden Pause startet automatisch eine neue Runde
-      const VERSION = "v0.0.3"; // Versionsanzeige unten rechts in der Ecke
+      const VERSION = "v0.0.4"; // Versionsanzeige unten rechts in der Ecke
+      const MAX_EDITORS = 20; // so viele Editoren darf ein Streamer maximal einladen
       // Pflichtangaben für Impressum und Datenschutzerklärung (werden auf der Seite angezeigt)
       const OPERATOR = { name: "Guter Mensch", address: "", email: "bonzig45@gmail.com" };
 
@@ -554,7 +575,10 @@
       let sb = null,
         session = null,
         row = null,
-        owner = false,
+        owner = false, // true = das ist MEINE Seite (Besitzer)
+        canEdit = false, // true = Besitzer ODER eingeladener Editor
+        haveOwn = false, // true = ich habe eine eigene Seite
+        myEdits = [], // Seiten anderer, bei denen ich Editor bin: [{ id, login, display_name }]
         data = emptyData(),
         ONLY = P.get("game") || null,
         cur = ONLY,
@@ -630,6 +654,16 @@
           b.append(x);
         } else {
           const me = loginOf(session.user);
+          if (haveOwn) {
+            const x = el("button", "Editoren", "btn ghost");
+            x.onclick = openEditors;
+            b.append(x);
+          }
+          if (myEdits.length) {
+            const x = el("button", "Ich editiere (" + myEdits.length + ")", "btn ghost");
+            x.onclick = openMyEdits;
+            b.append(x);
+          }
           if (!owner || P.get("s")) {
             const x = el("a", "Meine Seite", "btn ghost");
             x.href = location.pathname + (me ? "?s=" + me : "");
@@ -678,6 +712,10 @@
               "Du trägst nur Daten ein, die du eintragen darfst. Solange deine Seite geöffnet ist, wird der öffentliche Chat deines Kanals ausgewertet. Deine Community musst du darüber selbst informieren.",
             ],
             [
+              "Editoren",
+              "Du kannst andere Twitch-Nutzer als Editoren einladen. Editoren dürfen deine Tabellen bearbeiten, aber dich nicht entfernen und keine weiteren Editoren hinzufügen. Du kannst Editoren jederzeit wieder entfernen.",
+            ],
+            [
               "Löschen",
               "Du kannst deine Seite und alle Daten jederzeit selbst löschen (Button „Meine Seite & Daten löschen“).",
             ],
@@ -687,7 +725,7 @@
           ["Verantwortlicher", contact],
           [
             "Welche Daten verarbeitet werden",
-            "Bei der Anmeldung über Twitch: Twitch-ID, Benutzername und Anzeigename sowie der Zeitpunkt deiner Zustimmung. Dazu die Ergebnisse, die in den Ranglisten stehen: Anzeigenamen von Gewinnern und von den ersten Chattern eines Streams, jeweils mit Datum. Nachrichteninhalte aus dem Chat werden nicht gespeichert.",
+            "Bei der Anmeldung über Twitch: Twitch-ID, Benutzername und Anzeigename sowie der Zeitpunkt deiner Zustimmung. Dazu die Ergebnisse, die in den Ranglisten stehen: Anzeigenamen von Gewinnern und von den ersten Chattern eines Streams, jeweils mit Datum. Wenn du Editoren einlädst, wird deren Twitch-Benutzername bei deiner Seite gespeichert. Nachrichteninhalte aus dem Chat werden nicht gespeichert.",
           ],
           [
             "Zweck und Rechtsgrundlage",
@@ -744,9 +782,31 @@
         session = r.data.session;
         await boot();
       }
+      // Lädt: Habe ich eine eigene Seite? Bei wem bin ich Editor?
+      async function loadMine() {
+        haveOwn = false;
+        myEdits = [];
+        if (!session) return;
+        try {
+          const me = loginOf(session.user);
+          const a = await sb.from("streamers").select("id").eq("id", session.user.id).maybeSingle();
+          haveOwn = !!a.data;
+          if (me) {
+            const e = await sb.from("editors").select("streamer_id").eq("editor_login", me);
+            const ids = (e.data || []).map((x) => x.streamer_id);
+            if (ids.length) {
+              const s = await sb.from("streamers").select("id,login,display_name").in("id", ids);
+              myEdits = s.data || [];
+            }
+          }
+        } catch (err) {
+          console.error("Editor-Daten konnten nicht geladen werden", err);
+        }
+      }
       async function boot() {
         const me = session ? loginOf(session.user) : "";
         const target = (P.get("s") || me || "").toLowerCase();
+        await loadMine();
         renderBar();
         if (!target) {
           view("landing");
@@ -765,11 +825,13 @@
         }
         row = r;
         owner = !!session && r.id === session.user.id;
+        canEdit = owner || (!!session && myEdits.some((s) => s.id === r.id));
         data = { ...emptyData(), ...(r.data || {}) };
         fixCur();
         renderBar();
         channel = row.login;
         $("ownerBox").classList.toggle("hide", !owner || !!ONLY);
+        $("editorBox").classList.toggle("hide", owner || !canEdit || !!ONLY);
         if (owner) {
           $("shareLink").value = location.origin + location.pathname + "?s=" + row.login;
           $("dcLink").value = shareFor("chat");
@@ -782,6 +844,7 @@
         render();
       }
       async function reload() {
+        if (editing) return; // nicht mitten im Bearbeiten überschreiben
         const { data: r } = await sb.from("streamers").select("data").eq("login", row.login).maybeSingle();
         if (r) {
           data = { ...emptyData(), ...(r.data || {}) };
@@ -814,17 +877,27 @@
         location.href = location.pathname + "?s=" + lg;
       };
 
-      // Speichern (nur Besitzer)
+      // Speichern (Besitzer und Editoren)
+      let warnedSave = false;
       async function persist() {
-        if (!owner) return;
-        const { error } = await sb.from("streamers").update({ data }).eq("id", row.id);
-        if (error) console.error("Speichern fehlgeschlagen", error);
+        if (!canEdit) return;
+        const { data: u, error } = await sb.from("streamers").update({ data }).eq("id", row.id).select("id");
+        if (error || !u || !u.length) {
+          console.error("Speichern fehlgeschlagen", error || "keine Berechtigung");
+          if (!owner && !warnedSave) {
+            warnedSave = true;
+            alert(
+              "Speichern fehlgeschlagen. Vielleicht wurdest du als Editor entfernt oder die Datenbank-Regeln fehlen noch.",
+            );
+          }
+        }
       }
       function save() {
         render();
         persist();
       }
       $("delBtn").onclick = async () => {
+        if (!owner) return;
         if (!confirm("Deine Seite und ALLE Daten unwiderruflich löschen?")) return;
         await sb.from("streamers").delete().eq("id", row.id);
         await sb.auth.signOut();
@@ -842,6 +915,106 @@
         $("copyBtn").textContent = "Kopiert ✓";
         setTimeout(() => ($("copyBtn").textContent = "Kopieren"), 1500);
       };
+
+      // Editoren verwalten (nur Besitzer: einladen & entfernen)
+      async function openEditors() {
+        if (!session || !haveOwn) return;
+        const b = $("edBody");
+        b.innerHTML = "";
+        const intro = el(
+          "div",
+          "Editoren dürfen deine Tabellen bearbeiten (Einträge, Kategorien, Seasons). Sie können dich nicht entfernen und keine weiteren Editoren hinzufügen. Die Person meldet sich mit Twitch an und öffnet deine Seite.",
+          "info small",
+        );
+        intro.style.marginTop = "0";
+        b.append(intro);
+
+        const r = await sb
+          .from("editors")
+          .select("editor_login")
+          .eq("streamer_id", session.user.id)
+          .order("added_at");
+        if (r.error) {
+          b.append(
+            el(
+              "div",
+              "Editoren konnten nicht geladen werden: " + r.error.message + " (Wurde das SQL-Setup ausgeführt?)",
+              "info small",
+            ),
+          );
+          $("edModal").classList.remove("hide");
+          return;
+        }
+        const list = (r.data || []).map((x) => x.editor_login);
+
+        const addBox = el("div", null, "info");
+        addBox.append(el("div", "Editor hinzufügen (Twitch-Name)", "small"));
+        const ar = el("div", null, "row"),
+          inp = el("input");
+        inp.type = "text";
+        inp.placeholder = "Twitch-Name, z. B. meinmod";
+        const addBtn = el("button", "+ Einladen", "btn");
+        addBtn.onclick = async () => {
+          const nm = inp.value.trim().replace(/^@/, "").toLowerCase();
+          if (!/^[a-z0-9_]{2,25}$/.test(nm)) return alert("Das ist kein gültiger Twitch-Name.");
+          if (nm === loginOf(session.user)) return alert("Du bist ja schon Besitzer.");
+          if (list.includes(nm)) return alert(nm + " ist schon Editor.");
+          if (list.length >= MAX_EDITORS) return alert("Maximal " + MAX_EDITORS + " Editoren.");
+          addBtn.disabled = true;
+          const ins = await sb.from("editors").insert({ streamer_id: session.user.id, editor_login: nm });
+          if (ins.error) {
+            addBtn.disabled = false;
+            return alert("Hinzufügen fehlgeschlagen: " + ins.error.message);
+          }
+          openEditors();
+        };
+        inp.onkeydown = (e) => {
+          if (e.key === "Enter") addBtn.click();
+        };
+        ar.append(inp, addBtn);
+        addBox.append(ar);
+        b.append(addBox);
+
+        const listBox = el("div", null, "info");
+        listBox.append(el("div", "Deine Editoren (" + list.length + ")", "small"));
+        if (!list.length) listBox.append(el("div", "Noch keine Editoren.", "small"));
+        list.forEach((nm) => {
+          const rr = el("div", null, "row"),
+            del = el("button", "Entfernen", "btn ghost");
+          del.onclick = async () => {
+            if (!confirm(nm + " als Editor entfernen?")) return;
+            const d = await sb.from("editors").delete().eq("streamer_id", session.user.id).eq("editor_login", nm);
+            if (d.error) return alert("Entfernen fehlgeschlagen: " + d.error.message);
+            openEditors();
+          };
+          const s = el("span", nm);
+          s.style.flex = "1";
+          rr.append(s, del);
+          listBox.append(rr);
+        });
+        b.append(listBox);
+        $("edModal").classList.remove("hide");
+      }
+      $("edClose").onclick = () => $("edModal").classList.add("hide");
+
+      // Liste: Bei welchen Seiten bin ich Editor?
+      function openMyEdits() {
+        const b = $("myEditsBody");
+        b.innerHTML = "";
+        if (!myEdits.length) b.append(el("div", "Du bist bei keiner Seite Editor.", "info small"));
+        myEdits.forEach((s) => {
+          const rr = el("div", null, "row"),
+            go = el("a", "Öffnen", "btn");
+          go.href = location.pathname + "?s=" + s.login;
+          go.style.textDecoration = "none";
+          const n = el("span", s.display_name || s.login);
+          n.style.flex = "1";
+          rr.append(n, go);
+          b.append(rr);
+        });
+        $("myEditsModal").classList.remove("hide");
+      }
+      $("myEditsClose").onclick = () => $("myEditsModal").classList.add("hide");
 
       // Runden
       const canon = (list, n) => list.find((x) => x.toLowerCase() === n.toLowerCase()) || n;
@@ -1127,11 +1300,14 @@
           });
         }
         const eb = $("editBtn");
-        eb.classList.toggle("hide", !owner || !!ONLY);
+        eb.classList.toggle("hide", !canEdit || !!ONLY);
         eb.textContent = editing ? "✓ Fertig" : "✎ Bearbeiten";
         renderEditor();
         const info = $("info");
         info.innerHTML = "";
+        if (canEdit && !owner && !ONLY) {
+          info.append(el("div", "Du bearbeitest diese Seite als Editor.", "info small"));
+        }
         if (g.chat) {
           info.append(
             el(
@@ -1194,7 +1370,7 @@
         render();
       };
 
-      // Kategorien verwalten (nur Besitzer)
+      // Kategorien verwalten (Besitzer und Editoren)
       function statBoxes(stats, onChange) {
         const box = el("div"),
           inputs = {};
@@ -1221,6 +1397,7 @@
         return !s || s === "chat" || Object.keys(g).some((k) => k !== exceptKey && slug(g[k].t) === s);
       }
       function openCats() {
+        if (!canEdit) return;
         const b = $("catBody");
         b.innerHTML = "";
         const wrap = el("div", null, "info");
@@ -1277,14 +1454,15 @@
         $("catModal").classList.remove("hide");
       }
       $("catsBtn").onclick = openCats;
+      $("catsBtn2").onclick = openCats;
       $("catClose").onclick = () => $("catModal").classList.add("hide");
 
-      // Von Hand bearbeiten (nur Besitzer)
+      // Von Hand bearbeiten (Besitzer und Editoren)
       let editing = false;
       function renderEditor() {
         const box = $("editor");
         box.innerHTML = "";
-        if (!editing || !owner || ONLY || !cur) return;
+        if (!editing || !canEdit || ONLY || !cur) return;
         const g = G()[cur];
         if (!g) return;
         const S = getSeason(),
@@ -1625,6 +1803,9 @@
           buttonRow(
             ...Object.entries(G()).map(([k, gg]) => copyBtn(gg.t, mine + "&game=" + k)),
           ),
+        );
+        li(
+          "Du willst, dass jemand anderes mit-editieren kann? Oben bei „Editoren“ lädst du Leute per Twitch-Namen ein. Sie dürfen deine Tabellen bearbeiten, aber dich nicht entfernen und keine weiteren Editoren hinzufügen.",
         );
         b.append(ol);
         $("guide").classList.remove("hide");
